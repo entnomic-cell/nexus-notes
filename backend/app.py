@@ -60,6 +60,113 @@ if getattr(sys, 'frozen', False):
 app = Flask(__name__, static_folder=str(FRONTEND_DIR / "static"))
 CORS(app)
 
+# ── VERSION & UPDATER ──
+APP_VERSION  = "1.0.0"
+GITHUB_REPO  = "entnomic-cell/nexus-notes"
+GITHUB_API = "https://nexus-updater.jadfmy2021.workers.dev"
+
+_update_info = {"available": False, "version": "", "url": "", "checked": False}
+
+def _parse_version(v):
+    try:
+        return tuple(int(x) for x in str(v).lstrip("v").split("."))
+    except Exception:
+        return (0, 0, 0)
+
+def _check_for_update():
+    """Runs in a background thread on startup."""
+    try:
+        headers = {
+    "User-Agent": "NexusNotes-Updater"
+        }
+        resp = requests.get(GITHUB_API, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        latest_tag = data.get("tag_name", "")
+        if _parse_version(latest_tag) > _parse_version(APP_VERSION):
+            # Find the .exe asset
+            exe_url = ""
+            for asset in data.get("assets", []):
+                if asset.get("name", "").endswith(".exe"):
+                    exe_url = asset.get("browser_download_url", "")
+                    break
+            _update_info.update({
+                "available": True,
+                "version": latest_tag,
+                "url": exe_url,
+                "checked": True
+            })
+    except Exception:
+        pass
+    finally:
+        _update_info["checked"] = True
+
+@app.route('/api/update/check')
+def update_check():
+    return jsonify({
+        "current":   APP_VERSION,
+        "available": _update_info["available"],
+        "version":   _update_info["version"],
+        "url":       _update_info["url"],
+        "checked":   _update_info["checked"]
+    })
+
+@app.route('/api/update/apply', methods=['POST'])
+def update_apply():
+    """Download new .exe, verify SHA256, replace current exe, restart."""
+    if not _update_info["available"] or not _update_info["url"]:
+        return jsonify({"error": "No update available"}), 400
+    if not getattr(sys, 'frozen', False):
+        return jsonify({"error": "Only works in packaged .exe"}), 400
+    try:
+        exe_path = pathlib.Path(sys.executable)
+        tmp_path = exe_path.with_suffix(".new.exe")
+
+        # ── Fetch expected SHA256 from GitHub release assets ──
+        sha256_url = _update_info["url"].rsplit("/", 1)[0] + "/NexusNotes.exe.sha256"
+        sha_resp = requests.get(sha256_url, headers={"User-Agent": "NexusNotes-Updater"}, timeout=30)
+        if sha_resp.status_code != 200:
+            return jsonify({"error": "Could not fetch SHA256 checksum"}), 500
+        expected_hash = sha_resp.text.strip().lower()
+
+        # ── Download the new exe ──
+        resp = requests.get(_update_info["url"], headers={"User-Agent": "NexusNotes-Updater"},
+                            stream=True, timeout=120)
+        resp.raise_for_status()
+        hasher = hashlib.sha256()
+        with open(tmp_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                f.write(chunk)
+                hasher.update(chunk)
+
+        # ── Verify hash before doing anything ──
+        actual_hash = hasher.hexdigest().lower()
+        if actual_hash != expected_hash:
+            tmp_path.unlink(missing_ok=True)
+            return jsonify({"error": "SHA256 mismatch — update aborted, file may be tampered"}), 500
+
+        # ── Safe to install ──
+        bat = DATA_DIR / "_update.bat"
+        bat.write_text(
+            f'@echo off\n'
+            f'timeout /t 2 /nobreak >nul\n'
+            f'move /y "{tmp_path}" "{exe_path}"\n'
+            f'start "" "{exe_path}"\n'
+            f'del "%~f0"\n',
+            encoding="utf-8"
+        )
+        subprocess.Popen(
+            ["cmd.exe", "/c", str(bat)],
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        threading.Thread(target=lambda: (time.sleep(1), os._exit(0)),
+                         daemon=True).start()
+        return jsonify({"status": "restarting"})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -1678,6 +1785,8 @@ def launch_browser_app(url):
 if __name__ == '__main__':
     init_db()
     set_windows_app_id()
+    threading.Thread(target=_check_for_update, daemon=True).start()
+    threading.Thread(target=_check_for_update, daemon=True).start()
     flask_thread = threading.Thread(target=run_flask,daemon=True)
     flask_thread.start()
     time.sleep(0.8)
@@ -1702,7 +1811,9 @@ if __name__ == '__main__':
                 pass
         window = webview.create_window(**window_kwargs)
         set_windows_app_id()  # re-apply after window creation
-        webview.start()
+        def on_closed():
+            os._exit(0)
+        webview.start(on_closed)
     except ImportError:
         if not launch_browser_app('http://127.0.0.1:5050'):
             webbrowser.open('http://127.0.0.1:5050')
