@@ -1233,6 +1233,24 @@ kbd{background:var(--surface2);border:1px solid var(--border2);border-radius:3px
 .minimal-ui #statusbar{height:18px;padding:0 10px;}
 .minimal-ui #quick-actions-row{display:none !important;}
 
+/* ── AUTO-UPDATE BANNER ── */
+#update-banner{display:none;position:fixed;bottom:36px;right:20px;z-index:999;
+  background:linear-gradient(135deg,var(--purple),var(--blue));
+  color:#fff;border-radius:14px;padding:12px 18px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.35);
+  display:none;align-items:center;gap:14px;font-size:13px;font-weight:500;
+  animation:slideUpIn .3s ease;}
+#update-banner.show{display:flex;}
+#update-banner .upd-label{flex:1;}
+#update-banner .upd-label small{display:block;font-size:11px;opacity:.75;font-weight:400;}
+#update-banner .upd-btn{padding:7px 16px;border-radius:10px;border:none;
+  background:rgba(255,255,255,0.22);color:#fff;font-family:var(--font);
+  font-size:12px;font-weight:600;cursor:pointer;transition:background .15s;}
+#update-banner .upd-btn:hover{background:rgba(255,255,255,0.36);}
+#update-banner .upd-dismiss{background:transparent;border:none;color:rgba(255,255,255,.6);
+  font-size:18px;line-height:1;cursor:pointer;padding:0 2px;}
+#update-banner .upd-dismiss:hover{color:#fff;}
+@keyframes slideUpIn{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
 </style>
 </head>
 <body>
@@ -10403,6 +10421,56 @@ function disconnectGDrive(){
 <script src="/static/context-menu-engine.js"></script>
 <script>
 init();
+</script>
+
+<!-- AUTO-UPDATE BANNER -->
+<div id="update-banner">
+  <div class="upd-label">
+    Update available
+    <small id="upd-version-label"></small>
+  </div>
+  <button class="upd-btn" onclick="applyUpdate()">Install &amp; Restart</button>
+  <button class="upd-dismiss" onclick="dismissUpdate()" title="Dismiss">×</button>
+</div>
+
+<script>
+(function(){
+  async function checkUpdate(){
+    try{
+      const r=await fetch('/api/update/check');
+      const d=await r.json();
+      if(d.available){
+        const banner=document.getElementById('update-banner');
+        const lbl=document.getElementById('upd-version-label');
+        if(lbl)lbl.textContent='Version '+d.version+' is ready';
+        if(banner)banner.classList.add('show');
+      }
+    }catch(_){}
+  }
+  setTimeout(checkUpdate, 4000);
+  setInterval(checkUpdate, 30*60*1000);
+
+  window.applyUpdate=async function(){
+    const btn=document.querySelector('#update-banner .upd-btn');
+    if(btn){btn.textContent='Downloading…';btn.disabled=true;}
+    try{
+      const r=await fetch('/api/update/apply',{method:'POST'});
+      const d=await r.json();
+      if(d.status==='restarting'){
+        if(btn)btn.textContent='Restarting…';
+      }else{
+        if(btn){btn.textContent='Install & Restart';btn.disabled=false;}
+        alert('Update failed: '+(d.error||'unknown error'));
+      }
+    }catch(_){
+      if(btn){btn.textContent='Install & Restart';btn.disabled=false;}
+    }
+  };
+
+  window.dismissUpdate=function(){
+    document.getElementById('update-banner')?.classList.remove('show');
+  };
+})();
 </script>
 </body>
 </html>
